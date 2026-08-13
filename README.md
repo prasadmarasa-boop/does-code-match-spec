@@ -34,7 +34,7 @@ The tool performs all Mode 1 processing, then compares implemented lineage again
 
 - origin comparison
 - source comparison
-- derivation comparison
+- conservative derivation review (`REVIEW REQUIRED` until semantic equivalence is implemented)
 - `MATCH`
 - `MISMATCH`
 - `REVIEW REQUIRED`
@@ -48,6 +48,8 @@ The first prototype intentionally supports a limited subset of SAS:
 - `SET`
 - `MERGE`
 - `KEEP`
+- output dataset options such as `DATA ADSL(KEEP=...)`
+- `PROC SORT DATA=... OUT=...` lineage
 - simple assignments
 - `IF / THEN / ELSE`
 - common functions such as `INPUT()`
@@ -84,7 +86,16 @@ See the `sample/` folder:
 - `sample_adsl_spec.xlsx`
 - `expected_lineage_output.md`
 
-The sample specification intentionally contains one mismatch for `SAFFL`.
+The sample specification intentionally contains one mismatch for `SAFFL`. Rows with
+nonblank derivation text are reported as `REVIEW REQUIRED` because semantic derivation
+equivalence is not implemented yet.
+
+## Run tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
 
 ## Important disclaimer
 

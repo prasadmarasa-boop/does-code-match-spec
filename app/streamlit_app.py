@@ -76,7 +76,7 @@ if st.button("Analyze", type="primary"):
         st.dataframe(pd.DataFrame(lineage), use_container_width=True)
     else:
         spec_df = load_spec(spec_file)
-        compared = compare_to_spec(lineage, spec_df)
+        compared = compare_to_spec(lineage, spec_df, result["final_dataset"])
 
         st.subheader("Spec Validation")
         df = pd.DataFrame(compared)
