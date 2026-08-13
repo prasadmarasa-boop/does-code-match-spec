@@ -90,6 +90,11 @@ The sample specification intentionally contains one mismatch for `SAFFL`. Rows w
 nonblank derivation text are reported as `REVIEW REQUIRED` because semantic derivation
 equivalence is not implemented yet.
 
+Source validation is conservative: exact qualified lineage is required for `MATCH`,
+contradictory qualified lineage is `MISMATCH`, and ambiguous MERGE attribution, blank
+source evidence, incomplete output-variable discovery, or dataset-only evidence is
+`REVIEW REQUIRED`.
+
 ## Run tests
 
 ```bash

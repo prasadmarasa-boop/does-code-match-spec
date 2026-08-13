@@ -56,6 +56,26 @@ def test_proc_sort_preserves_upstream_lineage():
     assert studyid["ultimate_source"] == "SDTM.DM.STUDYID"
 
 
+def test_final_proc_sort_is_pass_through_not_assignment_text():
+    code = """
+    data adsl;
+      set sdtm.dm;
+      keep usubjid age;
+    run;
+    proc sort data=adsl out=sorted;
+      by usubjid;
+    run;
+    """
+    result = analyze_sas(code)
+    rows = variable_map(result)
+
+    assert result["final_dataset"] == "SORTED"
+    assert result["variables_complete"] is True
+    assert set(rows) == {"USUBJID", "AGE"}
+    assert rows["USUBJID"]["ultimate_source"] == "SDTM.DM.USUBJID"
+    assert "DATA" not in rows
+
+
 def test_direct_assignment_is_assigned_and_traced():
     code = """
     data final;
@@ -120,6 +140,20 @@ def test_multi_step_lineage_reaches_terminal_source():
     assert row["ultimate_source"] == "SDTM.DM.RFXSTDTC"
 
 
+def test_data_step_without_keep_has_unknown_completeness_but_resolves_observed_variable():
+    code = """
+    data adsl;
+      set sdtm.dm;
+      by usubjid;
+    run;
+    """
+    result = analyze_sas(code)
+
+    assert result["variables_complete"] is False
+    assert variable_map(result)["USUBJID"]["ultimate_source"] == "SDTM.DM.USUBJID"
+    assert result["warnings"]
+
+
 def test_sample_adsl_expected_lineage():
     code = (ROOT / "sample" / "sample_adsl.sas").read_text(encoding="utf-8")
     result = analyze_sas(code)
@@ -128,7 +162,7 @@ def test_sample_adsl_expected_lineage():
     assert result["final_dataset"] == "ADSL"
     assert set(rows) == {"STUDYID", "USUBJID", "AGE", "SEX", "TRTSDT", "AGEGR1", "SAFFL"}
     assert rows["STUDYID"]["ultimate_source"] == "SDTM.DM.STUDYID"
-    assert "SDTM.DM.USUBJID" in rows["USUBJID"]["ultimate_source"]
+    assert rows["USUBJID"]["ultimate_source"] == "SDTM.DM.USUBJID | SDTM.EX.USUBJID"
     assert rows["AGE"]["ultimate_source"] == "SDTM.DM.AGE"
     assert rows["SEX"]["ultimate_source"] == "SDTM.DM.SEX"
     assert rows["TRTSDT"]["ultimate_source"] == "SDTM.DM.RFXSTDTC"

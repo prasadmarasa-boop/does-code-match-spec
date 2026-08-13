@@ -16,19 +16,13 @@ def cell_text(value):
 
 
 def source_identities(text):
-    """Return qualified (dataset, variable) identities from lineage text."""
+    """Return typed LIBREF.DATASET.VARIABLE identities from lineage text."""
     identities = set()
     for token in re.findall(r"\b[A-Z_][A-Z0-9_]*(?:\.[A-Z_][A-Z0-9_]*)+\b", text.upper()):
         parts = token.split(".")
-        identities.add((".".join(parts[:-1]), parts[-1]))
+        if len(parts) == 3:
+            identities.add((".".join(parts[:2]), parts[2]))
     return identities
-
-
-def immediate_identities(text, final_dataset):
-    if not final_dataset:
-        return set()
-    variables = re.findall(r"\b[A-Z_][A-Z0-9_]*\b", text.upper())
-    return {(final_dataset.upper(), variable) for variable in variables}
 
 
 def _spec_fields(spec):
@@ -39,7 +33,7 @@ def _spec_fields(spec):
     }
 
 
-def compare_to_spec(lineage_rows, spec_df, final_dataset=None):
+def compare_to_spec(lineage_rows, spec_df, final_dataset=None, variables_complete=True):
     spec_map = {
         cell_text(row.get("Variable")).upper(): row
         for _, row in spec_df.iterrows()
@@ -73,19 +67,40 @@ def compare_to_spec(lineage_rows, spec_df, final_dataset=None):
         spec_source = fields["spec_source"].upper()
         spec_sources = source_identities(spec_source)
         program_sources = source_identities(cell_text(row.get("ultimate_source")))
-        program_sources.update(
-            immediate_identities(cell_text(row.get("immediate_source")), final_dataset)
-        )
+        spec_datasets = {dataset for dataset, _ in spec_sources}
+        program_datasets = {
+            cell_text(dataset).upper()
+            for dataset in row.get("contributing_datasets", ())
+            if cell_text(dataset)
+        }
 
         if not spec_source:
-            source_match = True
-            source_evaluated = True
-        elif not spec_sources:
-            source_match = False
-            source_evaluated = False
+            source_state = "unknown"
+            source_reason = "The specification does not document a qualified source identity."
+        elif (
+            spec_sources
+            and not program_sources
+            and program_datasets
+            and program_datasets.isdisjoint(spec_datasets)
+        ):
+            source_state = "mismatch"
+            source_reason = ""
+        elif not spec_sources or not program_sources:
+            source_state = "unknown"
+            source_reason = (
+                "A qualified LIBREF.DATASET.VARIABLE identity is unavailable on one side of the comparison."
+            )
+        elif spec_sources == program_sources:
+            source_state = "match"
+            source_reason = ""
+        elif spec_sources.isdisjoint(program_sources):
+            source_state = "mismatch"
+            source_reason = ""
         else:
-            source_match = bool(spec_sources & program_sources)
-            source_evaluated = True
+            source_state = "unknown"
+            source_reason = (
+                "Program lineage is ambiguous or only partially overlaps the documented source."
+            )
 
         if not class_match:
             status = "MISMATCH"
@@ -93,13 +108,10 @@ def compare_to_spec(lineage_rows, spec_df, final_dataset=None):
                 f"Program classification '{row.get('classification', '')}' differs from "
                 f"spec origin '{fields['spec_origin']}'."
             )
-        elif not source_evaluated:
+        elif source_state == "unknown":
             status = "REVIEW REQUIRED"
-            note = (
-                f"Documented source '{fields['spec_source']}' does not contain a qualified "
-                "dataset.variable identity and cannot be compared conservatively."
-            )
-        elif not source_match:
+            note = source_reason
+        elif source_state == "mismatch":
             status = "MISMATCH"
             note = (
                 f"Program lineage '{row.get('ultimate_source') or row.get('immediate_source', '')}' "
@@ -121,6 +133,12 @@ def compare_to_spec(lineage_rows, spec_df, final_dataset=None):
         if variable in program_variables:
             continue
         fields = _spec_fields(spec)
+        status = "MISMATCH" if variables_complete else "REVIEW REQUIRED"
+        note = (
+            "Variable is required by the specification but missing from the final program output."
+            if variables_complete
+            else "The parser could not determine the complete final variable set, so this specification variable cannot be proven absent."
+        )
         results.append(
             {
                 "variable": variable,
@@ -130,8 +148,8 @@ def compare_to_spec(lineage_rows, spec_df, final_dataset=None):
                 "derivation_logic": "",
                 "confidence": "",
                 **fields,
-                "status": "MISMATCH",
-                "review_note": "Variable is required by the specification but missing from the final program output.",
+                "status": status,
+                "review_note": note,
             }
         )
 

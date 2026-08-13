@@ -10,6 +10,7 @@ class VariableLineage:
     ultimate_source: str = ""
     derivation_logic: str = ""
     confidence: str = "High"
+    contributing_datasets: tuple = ()
 
     def to_dict(self):
         return asdict(self)
@@ -204,6 +205,38 @@ def assignments(body):
     return out
 
 
+def observed_variables(step):
+    """Return variables explicitly observable when a DATA step has no output KEEP list."""
+    if step["kind"] != "data":
+        return []
+    record_map = assignments(step["body"])
+    observed = list(record_map)
+    for records in record_map.values():
+        for record in records:
+            observed.extend(record[3])
+    for match in re.finditer(r"\bby\s+([^;]+);", step["body"], re.I):
+        observed.extend(re.findall(r"\b[A-Za-z_]\w*\b", match.group(1)))
+    aliases = set(step["aliases"])
+    return list(dict.fromkeys(x.upper() for x in observed if x.upper() not in aliases))
+
+
+def output_variables(dataset, steps, seen=None):
+    """Return (observable variables, complete) for a parsed output dataset."""
+    seen = set() if seen is None else seen
+    if dataset in seen:
+        return [], False
+    seen.add(dataset)
+    step = steps.get(dataset)
+    if not step:
+        return [], False
+    if step["keep"]:
+        return list(step["keep"]), True
+    if step["kind"] == "proc_sort":
+        source = step["inputs"][0] if step["inputs"] else None
+        return output_variables(source, steps, seen) if source else ([], False)
+    return observed_variables(step), False
+
+
 def terminal_dataset(dataset, steps, seen=None):
     seen = set() if seen is None else seen
     if dataset in seen:
@@ -213,6 +246,20 @@ def terminal_dataset(dataset, steps, seen=None):
     if not step or not step["inputs"]:
         return dataset
     return " + ".join(terminal_dataset(x, steps, seen.copy()) for x in step["inputs"])
+
+
+def terminal_datasets(dataset, steps, seen=None):
+    seen = set() if seen is None else seen
+    if dataset in seen:
+        return {dataset}
+    seen.add(dataset)
+    step = steps.get(dataset)
+    if not step or not step["inputs"]:
+        return {dataset}
+    out = set()
+    for source in step["inputs"]:
+        out.update(terminal_datasets(source, steps, seen.copy()))
+    return out
 
 
 def _step_can_output(dataset, variable, steps):
@@ -251,7 +298,7 @@ def resolve_carried(dataset, variable, steps, seen=None):
     step = steps.get(dataset)
     if not step:
         return f"{dataset}.{variable}"
-    records = assignments(step["body"]).get(variable, [])
+    records = assignments(step["body"]).get(variable, []) if step["kind"] == "data" else []
     direct = records and all(
         record[0] == "simple" and record[2].upper() == variable for record in records
     )
@@ -279,13 +326,14 @@ def analyze_sas(code):
             "final_dataset": None,
             "sources": [],
             "variables": [],
+            "variables_complete": False,
             "warnings": ["No DATA step or supported PROC SORT output found."],
         }
 
     final = order[-1]
     step = steps[final]
-    record_map = assignments(step["body"])
-    variables = step["keep"] or list(record_map)
+    record_map = assignments(step["body"]) if step["kind"] == "data" else {}
+    variables, variables_complete = output_variables(final, steps)
     rows = []
     for variable in variables:
         records = record_map.get(variable, [])
@@ -327,6 +375,10 @@ def analyze_sas(code):
         immediate = ", ".join(refs)
         ultimate = " | ".join(dict.fromkeys(resolve_ref(final, x, steps) for x in refs)) if refs else ""
         confidence = "High" if any(x in step["aliases"] for x in refs) else "Medium"
+        contributing_datasets = set()
+        for ref in refs:
+            if ref in step["aliases"]:
+                contributing_datasets.update(terminal_datasets(step["aliases"][ref], steps))
         rows.append(
             VariableLineage(
                 variable,
@@ -335,6 +387,18 @@ def analyze_sas(code):
                 ultimate,
                 "; ".join(logic),
                 confidence,
+                tuple(sorted(contributing_datasets)),
             ).to_dict()
         )
-    return {"final_dataset": final, "sources": step["inputs"], "variables": rows, "warnings": []}
+    warnings = []
+    if not variables_complete:
+        warnings.append(
+            "The complete final variable set could not be determined because no output KEEP list was found."
+        )
+    return {
+        "final_dataset": final,
+        "sources": step["inputs"],
+        "variables": rows,
+        "variables_complete": variables_complete,
+        "warnings": warnings,
+    }
