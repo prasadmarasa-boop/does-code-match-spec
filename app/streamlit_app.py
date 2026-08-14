@@ -8,9 +8,18 @@ sys.path.insert(0, str(ROOT))
 
 from src.sas_parser import analyze_sas
 from src.spec_checker import load_spec, compare_to_spec
+from src.semantic_comparator import apply_semantic_assessments, comparator_from_environment
 
 
-AUDIT_COLUMNS = {"lineage_paths", "evidence", "ambiguity_notes", "contributing_datasets"}
+AUDIT_COLUMNS = {
+    "lineage_paths",
+    "evidence",
+    "ambiguity_notes",
+    "contributing_datasets",
+    "semantic_assessment",
+    "semantic_rationale",
+    "semantic_assisted",
+}
 
 
 def compact_frame(rows):
@@ -55,6 +64,22 @@ def show_lineage_evidence(rows):
                     st.write(f"- {note}")
 
 
+def show_semantic_assessments(rows):
+    semantic_rows = [row for row in rows if row.get("semantic_assessment")]
+    if not semantic_rows:
+        return
+    st.subheader("AI semantic assessment")
+    st.caption(
+        "AI assessments are advisory metadata. The deterministic status above remains authoritative."
+    )
+    for row in semantic_rows:
+        st.markdown(
+            f"**{row.get('variable', 'Unknown variable')}** — "
+            f"{row['semantic_assessment']}"
+        )
+        st.write(row.get("semantic_rationale", ""))
+
+
 st.set_page_config(
     page_title="Does the Code Match the Spec?",
     layout="wide"
@@ -95,6 +120,28 @@ with right:
         """
     )
 
+ai_comparator, ai_disabled_reason = comparator_from_environment()
+ai_enabled = st.checkbox(
+    "Enable optional AI semantic comparison",
+    value=False,
+    disabled=ai_comparator is None,
+    help=(
+        "Only deterministic lineage metadata, specification text, and parser-extracted evidence "
+        "statements are sent. Uploaded data and dataset contents are never sent."
+    ),
+)
+if ai_comparator is None:
+    st.caption(ai_disabled_reason)
+else:
+    st.caption(
+        "Optional and off by default. Deterministic contradictions always override AI assessment."
+    )
+if ai_enabled:
+    st.info(
+        "Only extracted lineage metadata and specification text are sent to the AI service. "
+        "Dataset contents are not sent."
+    )
+
 if st.button("Analyze", type="primary"):
     if sas_file is not None:
         code = sas_file.getvalue().decode("utf-8", errors="replace")
@@ -132,10 +179,13 @@ if st.button("Analyze", type="primary"):
             result["final_dataset"],
             result["variables_complete"],
         )
+        if ai_enabled and ai_comparator is not None:
+            compared = apply_semantic_assessments(compared, ai_comparator)
 
         st.subheader("Spec Validation")
         df = compact_frame(compared)
         st.dataframe(df, use_container_width=True)
+        show_semantic_assessments(compared)
         show_lineage_evidence(compared)
 
         counts = df["status"].value_counts()

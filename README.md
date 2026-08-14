@@ -102,6 +102,59 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
+## Optional AI semantic comparison
+
+The deterministic lineage engine remains authoritative. An optional AI layer can assess
+free-text derivation semantics only for rows whose deterministic result is
+`REVIEW REQUIRED`. It never changes the deterministic `status`; its result is stored
+separately as `semantic_assessment` with one of:
+
+- `SEMANTIC MATCH`
+- `SEMANTIC MISMATCH`
+- `UNCERTAIN`
+
+Install the optional dependency and configure the API through environment variables:
+
+```bash
+pip install -r requirements-ai.txt
+# required to enable the UI checkbox
+OPENAI_API_KEY=...
+# optional; defaults to gpt-5.6
+OPENAI_SEMANTIC_MODEL=gpt-5.6
+```
+
+The feature is off by default. It is disabled entirely when `OPENAI_API_KEY` or the
+optional OpenAI SDK is unavailable. A deterministic `MISMATCH` is never sent for AI
+comparison and can never be overridden. Every Responses API request explicitly sets
+`store=False`.
+
+### Exact information sent to the AI
+
+For an eligible variable, the request contains a fixed system instruction that says to
+compare derivation semantics, use only supplied metadata, never invent datasets,
+variables, SAS statements, values, or line numbers, and return one of the three allowed
+assessment labels with a concise rationale. The user payload contains only this
+JSON-shaped metadata:
+
+```text
+variable_name
+deterministic_lineage_path
+deterministic_derivation_logic
+specification.origin
+specification.source
+specification.derivation
+evidence_statements
+```
+
+`evidence_statements` contains only SAS statements already extracted and marked as
+supported by the deterministic parser. The request does **not** include uploaded dataset
+contents, patient-level data, workbook contents beyond the selected specification fields,
+the complete uploaded SAS program, parser line numbers, filenames, or unsupported evidence.
+The AI can return only an assessment label and concise rationale. Its rationale is rejected
+to `UNCERTAIN` if it introduces unapproved SAS identities, statements, or line references.
+Rows without both specification derivation text and deterministic derivation logic are not
+sent, because there is no semantic derivation pair to compare.
+
 ## Important disclaimer
 
 This repository is a research/proof-of-concept project. It is **not a validated clinical or regulatory production system** and should not be used as the sole basis for regulatory decisions, production QC, or specification approval.
