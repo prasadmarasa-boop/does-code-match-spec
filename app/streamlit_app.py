@@ -10,6 +10,51 @@ from src.sas_parser import analyze_sas
 from src.spec_checker import load_spec, compare_to_spec
 
 
+AUDIT_COLUMNS = {"lineage_paths", "evidence", "ambiguity_notes", "contributing_datasets"}
+
+
+def compact_frame(rows):
+    frame = pd.DataFrame(rows)
+    return frame.drop(columns=[column for column in AUDIT_COLUMNS if column in frame], errors="ignore")
+
+
+def show_lineage_evidence(rows):
+    for row in rows:
+        variable = row.get("variable", "Unknown variable")
+        with st.expander(f"{variable}: Show lineage evidence"):
+            paths = row.get("lineage_paths", [])
+            if paths:
+                st.markdown("**Lineage path**")
+                for path in paths:
+                    st.code(" → ".join(path), language=None)
+            else:
+                st.info("No supported lineage path is available for this variable.")
+
+            st.markdown("**Supporting SAS evidence**")
+            evidence = row.get("evidence", [])
+            if not evidence:
+                st.warning("No exact supported SAS evidence is available.")
+            for item in evidence:
+                relationship = item.get("relationship") or item.get("kind", "Evidence")
+                if item.get("supported"):
+                    start = item.get("start_line")
+                    end = item.get("end_line")
+                    line_label = f"line {start}" if start == end else f"lines {start}–{end}"
+                    st.markdown(f"**{relationship}** — {line_label}")
+                    st.code(item.get("statement", ""), language="sas")
+                else:
+                    st.warning(f"Unsupported/uncertain: {relationship}")
+                if item.get("note"):
+                    st.caption(item["note"])
+
+            st.markdown(f"**Confidence:** {row.get('confidence', 'Unknown')}")
+            notes = row.get("ambiguity_notes", [])
+            if notes:
+                st.markdown("**Ambiguity notes**")
+                for note in notes:
+                    st.write(f"- {note}")
+
+
 st.set_page_config(
     page_title="Does the Code Match the Spec?",
     layout="wide"
@@ -67,13 +112,18 @@ if st.button("Analyze", type="primary"):
         st.stop()
 
     st.subheader(f"Final dataset: {result['final_dataset']}")
-    st.write("Input datasets detected:", ", ".join(result["sources"]) or "None detected")
+    st.write("Direct input datasets:", ", ".join(result["sources"]) or "None detected")
+    st.write(
+        "Upstream source datasets:",
+        ", ".join(result["upstream_sources"]) or "None detected",
+    )
 
     lineage = result["variables"]
 
     if spec_file is None:
         st.subheader("Variable Lineage")
-        st.dataframe(pd.DataFrame(lineage), use_container_width=True)
+        st.dataframe(compact_frame(lineage), use_container_width=True)
+        show_lineage_evidence(lineage)
     else:
         spec_df = load_spec(spec_file)
         compared = compare_to_spec(
@@ -84,8 +134,9 @@ if st.button("Analyze", type="primary"):
         )
 
         st.subheader("Spec Validation")
-        df = pd.DataFrame(compared)
+        df = compact_frame(compared)
         st.dataframe(df, use_container_width=True)
+        show_lineage_evidence(compared)
 
         counts = df["status"].value_counts()
         c1, c2, c3 = st.columns(3)
