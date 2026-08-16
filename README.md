@@ -50,6 +50,8 @@ The first prototype intentionally supports a limited subset of SAS:
 - `KEEP`
 - output dataset options such as `DATA ADSL(KEEP=...)`
 - `PROC SORT DATA=... OUT=...` lineage
+- narrow `PROC SQL CREATE TABLE ... SELECT ... FROM ... GROUP BY ...`
+- deterministic `COUNT()` and `SUM()` SELECT-expression lineage
 - simple assignments
 - `IF / THEN / ELSE`
 - common functions such as `INPUT()`
@@ -57,7 +59,7 @@ The first prototype intentionally supports a limited subset of SAS:
 
 Future versions may add:
 
-- `PROC SQL`
+- broader `PROC SQL` joins, subqueries, `HAVING`, unions, and window functions
 - `RENAME`
 - macro expansion
 - `%INCLUDE`
@@ -85,6 +87,14 @@ See the `sample/` folder:
 - `sample_adsl.sas`
 - `sample_adsl_spec.xlsx`
 - `expected_lineage_output.md`
+- `sample_abr.sas`
+- `expected_abr_lineage.md`
+
+The fully synthetic ABR fixture proves multi-step endpoint lineage through qualifying-event
+filtering, grouped event counting, observation-date derivation, follow-up day/year
+arithmetic, intermediate sorting and merging, and the final annualized bleeding-rate
+formula. No local model participates in lineage construction; it can only explain the
+deterministic evidence after analysis.
 
 The sample specification intentionally contains one mismatch for `SAFFL`. Rows with
 nonblank derivation text are reported as `REVIEW REQUIRED` because semantic derivation
@@ -117,7 +127,7 @@ SAS-focused profile and enable it for the application:
 ```bash
 # Install Ollama separately, then:
 ollama pull qwen2.5-coder:7b
-ollama create sas-explainer -f local_model/Modelfile
+ollama create sas-lineage-assistant -f local_model/Modelfile
 
 # Windows PowerShell
 $env:LOCAL_SAS_EXPLAINER_ENABLED="1"
@@ -127,9 +137,22 @@ streamlit run app/streamlit_app.py
 Configuration is optional:
 
 ```text
-LOCAL_SAS_EXPLAINER_MODEL=sas-explainer:latest
+LOCAL_SAS_EXPLAINER_MODEL=sas-lineage-assistant:latest
 LOCAL_SAS_EXPLAINER_URL=http://127.0.0.1:11434/api/chat
 ```
+
+Start Streamlit from the same PowerShell session in which these variables are set. When enabled,
+the app displays the configured model and loopback endpoint. The adapter prefers Ollama JSON-schema
+output and falls back to JSON mode with the same local validation when schema output is unsupported.
+Failures appear in the variable expander and are logged by exception type, HTTP status, and Ollama
+error message; the request payload and uploaded content are never logged.
+
+Explanation requests are focused on the selected variable's shortest deterministic lineage chain.
+Sources are deduplicated case-insensitively in lineage order, numbered model steps are normalized by
+the UI, and ordinary SAS vocabulary such as character, numeric, ISO, informat, and conversion is not
+treated as a lineage identity. Explicit dotted identities, dataset/variable claims, merge participants,
+and merge indicators remain evidence-validated. After one bounded model correction, any still-invalid
+prose is replaced with a clearly marked deterministic lineage/derivation fallback rather than accepted.
 
 The feature is off by default. The adapter accepts only an HTTP loopback address
 (`127.0.0.1`, `localhost`, or `::1`) ending in `/api/chat`; a cloud or LAN model endpoint

@@ -20,12 +20,12 @@ FUNCTIONS = {
     "input", "put", "ifn", "ifc", "cat", "cats", "catt", "catx", "coalesce",
     "coalescec", "substr", "scan", "strip", "trim", "left", "right", "compress",
     "upcase", "lowcase", "missing", "sum", "mean", "min", "max", "round", "int",
-    "datepart", "timepart",
+    "datepart", "timepart", "count",
 }
 KEYWORDS = {
     "if", "then", "else", "do", "end", "not", "and", "or", "in", "first", "last",
     "where", "by", "keep", "drop", "rename", "format", "informat", "length", "label",
-    "retain",
+    "retain", "select", "from", "group", "distinct", "as", "having",
 }
 
 
@@ -164,6 +164,69 @@ def transformation_evidence(body, body_start, code):
     return evidence
 
 
+def split_sql_select_list(text):
+    """Return top-level SELECT expressions with offsets relative to *text*."""
+    expressions = []
+    start = 0
+    depth = 0
+    quote = None
+    for index, char in enumerate(text):
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(depth - 1, 0)
+        elif char == "," and depth == 0:
+            raw = text[start:index]
+            left = len(raw) - len(raw.lstrip())
+            right = len(raw.rstrip())
+            if raw.strip():
+                expressions.append((raw.strip(), start + left, start + right))
+            start = index + 1
+    raw = text[start:]
+    left = len(raw) - len(raw.lstrip())
+    right = len(raw.rstrip())
+    if raw.strip():
+        expressions.append((raw.strip(), start + left, start + right))
+    return expressions
+
+
+def sql_select_assignments(select_text, select_start, code):
+    outputs, records = [], {}
+    for expression, relative_start, relative_end in split_sql_select_list(select_text):
+        alias_match = re.match(r"^(.*?)\s+as\s+([A-Za-z_]\w*)$", expression, re.I | re.S)
+        if alias_match:
+            rhs = alias_match.group(1).strip()
+            output = alias_match.group(2).upper()
+        elif re.fullmatch(r"[A-Za-z_]\w*", expression):
+            rhs = expression.strip()
+            output = rhs.upper()
+        else:
+            return [], {}, "Every supported SELECT expression must have an explicit AS alias."
+        evidence = evidence_for_span(
+            code,
+            select_start + relative_start,
+            select_start + relative_end,
+            "sql_select",
+        )
+        lowered = rhs.lstrip().lower()
+        kind = "simple" if rhs.upper() == output else "sql_expression"
+        if lowered.startswith("count(") or lowered.startswith("sum("):
+            kind = "sql_aggregate"
+        outputs.append(output)
+        records.setdefault(output, []).append(
+            (kind, "", rhs, identifiers(rhs), evidence)
+        )
+    if len(outputs) != len(set(outputs)):
+        return [], {}, "Duplicate PROC SQL output aliases are unsupported."
+    return outputs, records, ""
+
+
 def parse_steps(code):
     clean = strip_comments(code)
     events = []
@@ -224,6 +287,117 @@ def parse_steps(code):
             "transformation_evidence": transformation_evidence(body, body_start, code),
         }
         events.append((match.start(), output, step))
+
+    sql_pattern = r"\bproc\s+sql\s*;(.*?)(?=\bquit\s*;)"
+    create_pattern = (
+        r"\bcreate\s+table\s+([A-Za-z_][\w.]*)\s+as\s+"
+        r"select\s+(.*?)\s+from\s+([A-Za-z_][\w.]*)(.*?);"
+    )
+    for sql_match in re.finditer(sql_pattern, clean, re.I | re.S):
+        sql_body = sql_match.group(1)
+        sql_body_start = sql_match.start(1)
+        for create_match in re.finditer(create_pattern, sql_body, re.I | re.S):
+            output = create_match.group(1).upper()
+            select_text = create_match.group(2)
+            source = create_match.group(3).upper()
+            tail = create_match.group(4)
+            select_start = sql_body_start + create_match.start(2)
+            outputs, select_records, unsupported_reason = sql_select_assignments(
+                select_text, select_start, code
+            )
+            if "*" in select_text:
+                unsupported_reason = "SELECT * is unsupported because output variables are not explicit."
+            if re.search(
+                r"\b(?:join|union|having|intersect|except)\b|\bselect\b",
+                tail,
+                re.I,
+            ) or re.match(r"\s*,", tail):
+                unsupported_reason = (
+                    "PROC SQL joins, set operators, HAVING, subqueries, and multiple FROM inputs "
+                    "are not deterministically supported."
+                )
+
+            create_start = sql_body_start + create_match.start()
+            create_end = sql_body_start + create_match.end()
+            create_evidence = evidence_for_span(
+                code, create_start, create_end, "sql_create_table"
+            )
+            source_start = sql_body_start + create_match.start(3)
+            source_relative_start = create_match.start(3) - create_match.start()
+            prefix = create_match.group(0)[:source_relative_start]
+            from_match = re.search(r"\bfrom\s*$", prefix, re.I)
+            from_start = (
+                sql_body_start + create_match.start() + from_match.start()
+                if from_match
+                else source_start
+            )
+            from_evidence = evidence_for_span(
+                code,
+                from_start,
+                sql_body_start + create_match.end(3),
+                "sql_from",
+            )
+
+            transformation_records = []
+            tail_start = sql_body_start + create_match.start(4)
+            where_match = re.search(
+                r"\bwhere\s+.*?(?=\bgroup\s+by\b|$)", tail, re.I | re.S
+            )
+            if where_match:
+                transformation_records.append(
+                    evidence_for_span(
+                        code,
+                        tail_start + where_match.start(),
+                        tail_start + where_match.end(),
+                        "sql_where",
+                    )
+                )
+            group_match = re.search(r"\bgroup\s+by\s+.*$", tail, re.I | re.S)
+            if group_match:
+                transformation_records.append(
+                    evidence_for_span(
+                        code,
+                        tail_start + group_match.start(),
+                        tail_start + group_match.end(),
+                        "sql_group_by",
+                    )
+                )
+
+            if unsupported_reason:
+                step = {
+                    "kind": "proc_sql_unsupported",
+                    "body": create_match.group(0),
+                    "inputs": [],
+                    "aliases": {},
+                    "input_keep": {},
+                    "input_evidence": {},
+                    "keep": outputs,
+                    "keep_evidence": [],
+                    "output_evidence": create_evidence,
+                    "assignments": {},
+                    "transformation_evidence": [
+                        unsupported_evidence(
+                            f"Unsupported PROC SQL output {output}", unsupported_reason
+                        )
+                    ],
+                    "warnings": [unsupported_reason],
+                }
+            else:
+                step = {
+                    "kind": "proc_sql",
+                    "body": create_match.group(0),
+                    "inputs": [source],
+                    "aliases": {},
+                    "input_keep": {},
+                    "input_evidence": {source: [create_evidence, from_evidence]},
+                    "keep": outputs,
+                    "keep_evidence": [],
+                    "output_evidence": create_evidence,
+                    "assignments": select_records,
+                    "transformation_evidence": transformation_records,
+                    "warnings": [],
+                }
+            events.append((sql_body_start + create_match.start(), output, step))
 
     for match in re.finditer(r"\bproc\s+sort\b(.*?)(?=\brun\s*;)", clean, re.I | re.S):
         block = match.group(1)
@@ -368,7 +542,12 @@ def terminal_datasets(dataset, steps, seen=None):
 
 def _step_can_output(dataset, variable, steps):
     step = steps.get(dataset)
-    return not step or not step["keep"] or variable in step["keep"]
+    if not step:
+        return True
+    if step["keep"]:
+        return variable in step["keep"]
+    variables, complete = output_variables(dataset, steps)
+    return variable in variables if complete else True
 
 
 def _input_allows(step, dataset, variable):
@@ -376,8 +555,10 @@ def _input_allows(step, dataset, variable):
     return not keep or variable in keep
 
 
-def resolve_ref(current_dataset, ref, steps):
+def resolve_ref(current_dataset, ref, steps, seen=None):
     step = steps[current_dataset]
+    if ref in step["assignments"]:
+        return resolve_carried(current_dataset, ref, steps, seen)
     if ref in step["aliases"]:
         dataset = step["aliases"][ref]
         return f"{dataset} -> {terminal_dataset(dataset, steps)}"
@@ -402,7 +583,7 @@ def resolve_carried(dataset, variable, steps, seen=None):
     step = steps.get(dataset)
     if not step:
         return f"{dataset}.{variable}"
-    records = step["assignments"].get(variable, []) if step["kind"] == "data" else []
+    records = step["assignments"].get(variable, [])
     direct = records and all(
         record[0] == "simple" and record[2].upper() == variable for record in records
     )
@@ -419,7 +600,9 @@ def resolve_carried(dataset, variable, steps, seen=None):
     for record in records:
         refs.extend(x for x in record[3] if x != variable)
     if refs:
-        return " | ".join(resolve_ref(dataset, x, steps) for x in dict.fromkeys(refs))
+        return " | ".join(
+            resolve_ref(dataset, x, steps, seen.copy()) for x in dict.fromkeys(refs)
+        )
     return dataset
 
 
@@ -471,6 +654,8 @@ def trace_dataset(dataset, steps, seen=None):
 
 def trace_reference(current_dataset, ref, steps, seen=None):
     step = steps[current_dataset]
+    if ref in step["assignments"]:
+        return trace_variable(current_dataset, ref, steps, seen)
     if ref in step["aliases"]:
         source = step["aliases"][ref]
         records = [
@@ -530,7 +715,7 @@ def trace_variable(dataset, variable, steps, seen=None):
     if not step:
         return [{"nodes": [node], "evidence": []}]
 
-    records = step["assignments"].get(variable, []) if step["kind"] == "data" else []
+    records = step["assignments"].get(variable, [])
     direct = records and all(
         record[0] == "simple" and record[2].upper() == variable for record in records
     )
@@ -602,6 +787,59 @@ def _deduplicate_evidence(records):
     return out
 
 
+def variable_lineage_is_ambiguous(dataset, variable, steps, seen=None):
+    seen = set() if seen is None else seen
+    key = (dataset, variable)
+    if key in seen:
+        return False
+    seen.add(key)
+    step = steps.get(dataset)
+    if not step:
+        return False
+    records = step["assignments"].get(variable, [])
+    direct = records and all(
+        record[0] == "simple" and record[2].upper() == variable for record in records
+    )
+    if records and not direct:
+        refs = {
+            ref
+            for record in records
+            for ref in record[3]
+            if ref != variable
+        }
+        for ref in refs:
+            if ref in step["aliases"]:
+                continue
+            if ref in step["assignments"]:
+                if variable_lineage_is_ambiguous(dataset, ref, steps, seen.copy()):
+                    return True
+                continue
+            candidates = [
+                source
+                for source in step["inputs"]
+                if _input_allows(step, source, ref) and _step_can_output(source, ref, steps)
+            ]
+            if len(candidates) > 1:
+                return True
+            if len(candidates) == 1 and variable_lineage_is_ambiguous(
+                candidates[0], ref, steps, seen.copy()
+            ):
+                return True
+        return False
+
+    candidates = [
+        source
+        for source in step["inputs"]
+        if _input_allows(step, source, variable) and _step_can_output(source, variable, steps)
+    ]
+    if len(candidates) > 1:
+        return True
+    return bool(
+        len(candidates) == 1
+        and variable_lineage_is_ambiguous(candidates[0], variable, steps, seen.copy())
+    )
+
+
 def variable_audit(dataset, variable, steps, records):
     traces = trace_variable(dataset, variable, steps)
     evidence = [item for trace in traces for item in trace["evidence"]]
@@ -618,7 +856,7 @@ def variable_audit(dataset, variable, steps, records):
         )
     )
     ambiguity_notes = []
-    if len(traces) > 1:
+    if variable_lineage_is_ambiguous(dataset, variable, steps):
         ambiguity_notes.append(
             "Multiple supported lineage paths exist; the actual contributing source cannot be proven."
         )
@@ -644,7 +882,7 @@ def analyze_sas(code):
 
     final = order[-1]
     step = steps[final]
-    record_map = step["assignments"] if step["kind"] == "data" else {}
+    record_map = step["assignments"]
     variables, variables_complete = output_variables(final, steps)
     rows = []
     for variable in variables:
@@ -703,7 +941,11 @@ def analyze_sas(code):
             ).to_dict()
         row.update(audit)
         rows.append(row)
-    warnings = []
+    warnings = [
+        warning
+        for parsed_step in steps.values()
+        for warning in parsed_step.get("warnings", [])
+    ]
     if not variables_complete:
         warnings.append(
             "The complete final variable set could not be determined because no output KEEP list was found."

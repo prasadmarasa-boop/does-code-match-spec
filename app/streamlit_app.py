@@ -1,3 +1,4 @@
+import re
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.local_sas_explainer import (
+    cache_explanation,
     explain_row,
     explainer_from_environment,
     prioritize_explanation_rows,
@@ -71,21 +73,32 @@ def show_lineage_evidence(rows):
 
 
 def display_explanation(explanation):
-    if not explanation.get("accepted", False):
+    if explanation.get("error"):
+        st.error(f"Local explanation failed: {explanation['error']}")
+    elif not explanation.get("accepted", False):
         st.warning(explanation.get("summary", "The explanation could not be accepted."))
     else:
         st.markdown("**Concise derivation summary**")
         st.write(explanation.get("summary", ""))
 
     st.markdown("**Evidence-supported sources**")
-    sources = explanation.get("supported_sources", [])
+    sources = []
+    seen_sources = set()
+    for source in explanation.get("supported_sources", []):
+        cleaned = " ".join(str(source).split())
+        if cleaned and cleaned.upper() not in seen_sources:
+            seen_sources.add(cleaned.upper())
+            sources.append(cleaned)
     st.write(", ".join(sources) if sources else "No supported sources were returned.")
 
     st.markdown("**Implemented logic**")
     steps = explanation.get("implemented_steps", [])
     if steps:
         for index, step in enumerate(steps, start=1):
-            st.write(f"{index}. {step}")
+            normalized_step = re.sub(
+                r"^\s*(?:\d+\s*[.)]|[-*])\s*", "", str(step)
+            ).strip()
+            st.write(f"{index}. {normalized_step}")
     else:
         st.write("No accepted implementation steps were returned.")
 
@@ -104,20 +117,29 @@ def show_explanation_sections(rows, explainer, enabled, analysis_id):
         "REVIEW REQUIRED variables are shown first. Explanations are optional and never change "
         "MATCH, MISMATCH, or REVIEW REQUIRED."
     )
-    cache = st.session_state.setdefault("local_derivation_explanations", {})
+    cache = st.session_state.get("local_derivation_explanations", {})
     prioritized = prioritize_explanation_rows(rows)
     for original_index, row in prioritized:
         variable = row.get("variable", "Unknown variable")
         status = row.get("status", "LINEAGE ONLY")
         cache_key = f"{analysis_id}:{original_index}:{variable}"
-        with st.expander(f"Explain implemented logic — {variable} [{status}]"):
+        with st.expander(
+            f"Explain implemented logic — {variable} [{status}]",
+            expanded=cache_key in cache,
+        ):
             if status == "REVIEW REQUIRED":
                 st.caption("Prioritized because deterministic validation requires review.")
             if not enabled or explainer is None:
                 st.info("Enable Local SAS Derivation Explanation above to generate this explanation.")
             elif st.button("Generate local explanation", key=f"explain:{cache_key}"):
-                explained = explain_row(row, explainer)
-                cache[cache_key] = explained["local_derivation_explanation"]
+                with st.spinner("Generating local explanation..."):
+                    explained = explain_row(row, explainer)
+                cache_explanation(
+                    st.session_state,
+                    cache_key,
+                    explained["local_derivation_explanation"],
+                )
+                st.rerun()
             if cache_key in cache:
                 display_explanation(cache[cache_key])
 
@@ -134,7 +156,7 @@ def render_analysis(view, explainer, explanation_enabled):
     if view["has_spec"]:
         st.subheader("Spec Validation")
         frame = compact_frame(rows)
-        st.dataframe(frame, use_container_width=True)
+        st.dataframe(frame, width="stretch")
         counts = frame["status"].value_counts()
         c1, c2, c3 = st.columns(3)
         c1.metric("MATCH", int(counts.get("MATCH", 0)))
@@ -142,7 +164,7 @@ def render_analysis(view, explainer, explanation_enabled):
         c3.metric("REVIEW REQUIRED", int(counts.get("REVIEW REQUIRED", 0)))
     else:
         st.subheader("Variable Lineage")
-        st.dataframe(compact_frame(rows), use_container_width=True)
+        st.dataframe(compact_frame(rows), width="stretch")
 
     show_explanation_sections(rows, explainer, explanation_enabled, view["analysis_id"])
     show_lineage_evidence(rows)
@@ -198,6 +220,7 @@ else:
     st.caption(
         "Optional and off by default. The local explanation cannot change deterministic status."
     )
+    st.caption(f"Configured local model: {local_explainer.model} at {local_explainer.endpoint}")
 if explanation_enabled:
     st.info(
         "Local SAS Derivation Explanation runs on this computer through a loopback-only endpoint. "
